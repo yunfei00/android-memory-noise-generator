@@ -1,6 +1,6 @@
 # Android Memory Noise Generator
 
-当前开发版本：**0.2.0-beta.2**（versionCode 2）。本轮不创建 Tag 或 GitHub Release。
+当前正式版本：**0.2.0**（versionCode 3）。
 
 原生 Kotlin Android App，用于近场电磁探测实验中的受控内存活动。只产生内存写入，不采集电磁信号；无网络权限、文件权限、账号、数据库、后台服务或 root 功能。minSdk 29（Android 10），compile/targetSdk 36。
 
@@ -25,7 +25,7 @@ APK：`app/build/outputs/apk/debug/app-debug.apk`。首次构建需要下载构�
 
 ## GitHub Release
 
-推送与 Android `versionName` 一致的 `v*` tag（例如 `v0.1.0`）会触发 `.github/workflows/release.yml`。Actions 使用 Java 21 和 Android SDK 36 构建 debug APK，执行 JVM 测试及 Lint，然后自动创建 GitHub Release 并上传 `android-memory-noise-generator-v0.1.0.apk`（文件名随 tag 变化）。Release Notes 来自 `.github/release-notes.md`，后续版本发布前同步更新。
+推送与 Android `versionName` 一致的 `v*` tag（例如 `v0.2.0`）会触发 `.github/workflows/release.yml`。Actions 使用 Java 21 和 Android SDK 36 构建 debug APK，执行 JVM 测试及 Lint，然后自动创建 GitHub Release 并上传 `android-memory-noise-generator-v0.2.0.apk`（文件名随 tag 变化）。Release Notes 来自 `.github/release-notes.md`，后续版本发布前同步更新。
 
 下载：[GitHub Releases](https://github.com/yunfei00/android-memory-noise-generator/releases)。CI 的 debug 签名与本机构建签名可能不同，跨签名安装不能直接覆盖；本项目尚未配置长期 release 签名密钥。
 
