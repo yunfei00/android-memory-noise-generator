@@ -16,6 +16,12 @@
 - 内存大小：16、32、64、128、256、512 MB 和自定义 MB；分配失败可恢复。
 - 单后台 Worker，重复启动保护；STOP、离开页面和 Activity 重建时清理 Worker 和 Buffer 引用。
 
+安装与发布包：
+
+- 安装后桌面名称显示为 **Memory Noise**。
+- 推荐下载 `android-memory-noise-generator-v0.2.0-package.zip`，其中包含 APK、详细中文使用说明和 Release Notes。
+- 同时保留独立 APK，便于直接下载安装到手机。
+
 版本信息：
 
 - versionName: `0.2.0`
@@ -31,6 +37,8 @@
 - 真机验证覆盖 `00 ↔ FF`、`55 ↔ AA`、自动切组、倒计时、Idle Gap、Pause/Resume、STOP/释放、重复启停和生命周期清理。
 - Continuous、Burst、Toggle 原模式回归通过。
 
-附件为 GitHub Actions 自动构建的 debug 签名实验 APK。App 无网络权限和用户文件访问权限。
+GitHub Actions 会重新构建 APK、执行 JVM 测试和 Lint，并在发布前校验 APK 的桌面应用名称为 `Memory Noise`。
+
+App 无网络权限和用户文件访问权限。GitHub Actions 生成的 APK 使用 CI debug 签名；如果旧版本签名不同，可能需要先卸载旧版再安装。
 
 **实验解释边界：**观察到不同 Pattern 的近场差异，并不能直接证明探测到了 RAM 中存储的 0/1。变化可能同时来自 CPU、Cache、Memory Controller、DDR Bus、PMIC、DVFS 等因素。Sweep/Burst 受 Android 调度影响，不保证硬实时，应用统计带宽也不等于物理 DDR 带宽。
