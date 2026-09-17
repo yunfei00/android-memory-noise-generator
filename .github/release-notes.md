@@ -1,44 +1,30 @@
-# Android Memory Noise Generator v0.2.0
+# Android Memory Noise Generator v0.2.1
 
-这是首个包含 **Pattern Sweep** 的正式实验版本，用于近场电磁探测实验中的稳定、可控、可重复内存写入。App 不采集电磁信号。
+这是 v0.2.0 的修正版，重点修复部分 Android / OEM Launcher 安装 GitHub Release APK 后桌面只显示图标、不显示应用名称的问题。
 
-主要功能：
+本版本修复：
 
-- Pattern：IDLE、ZERO、ONE、AA、55、AA55，以及自定义 HEX Pattern。
-- Continuous：持续循环写入整个测试 Buffer。
-- Burst：按自定义 WRITE / IDLE 时长周期性写入和停止。
-- AA ↔ 55 Toggle：整段 Buffer 交替写入 AA / 55。
+- 为 Application 和 Launcher Activity 显式配置应用名称 `Memory Noise`。
+- 新增明确的 Launcher 图标资源，并在 Manifest 中显式设置 `android:icon` / `android:roundIcon`。
+- GitHub Actions 发布前不再只检查应用名称，还会检查 Application 与 Launcher Activity 的图标资源是否实际打进 APK；缺失时直接阻止发布。
+- versionName 更新为 `0.2.1`，versionCode 更新为 `4`。
+
+主要功能保持不变：
+
+- Pattern：IDLE、ZERO、ONE、AA、55、AA55、自定义 HEX。
+- Continuous / Burst / AA↔55 Toggle。
 - Pattern Sweep：自动遍历 128 组互补 Pattern：`00 ↔ FF`、`01 ↔ FE`、…、`55 ↔ AA`、…、`7F ↔ 80`。
-- Sweep 每组时长支持 10/20/30/60 秒和自定义；组间 Idle Gap 支持 0/1/2/5 秒和自定义。
-- Sweep 支持 PAUSE / RESUME / STOP；暂停期间停止主动内存写入，恢复后继续当前组。
-- 大字体显示当前组、当前 Pattern、Remaining 和 Next，便于实验人员站在频谱仪旁人工观察。
-- 实时统计：状态、分配内存、累计写入、平均/当前带宽、Elapsed、Loop/Toggle 等。
-- 内存大小：16、32、64、128、256、512 MB 和自定义 MB；分配失败可恢复。
-- 单后台 Worker，重复启动保护；STOP、离开页面和 Activity 重建时清理 Worker 和 Buffer 引用。
+- Sweep 支持 10/20/30/60 秒和自定义组时长、0/1/2/5 秒和自定义 Idle Gap。
+- PAUSE / RESUME / STOP。
+- 大字体显示当前组、当前 Pattern、Remaining 和 Next。
+- 实时统计内存、累计写入、平均/当前带宽、Elapsed、Loop/Toggle 等。
 
-安装与发布包：
+安装说明：
 
-- 安装后桌面名称显示为 **Memory Noise**。
-- 推荐下载 `android-memory-noise-generator-v0.2.0-package.zip`，其中包含 APK、详细中文使用说明和 Release Notes。
-- 同时保留独立 APK，便于直接下载安装到手机。
+- 推荐先卸载旧的 `0.2.0`，再安装 `0.2.1`，以避免部分桌面 Launcher 缓存旧的图标/名称元数据。
+- 安装后桌面名称应显示为 **Memory Noise**。
+- 推荐下载 `android-memory-noise-generator-v0.2.1-package.zip`，其中包含 APK、中文使用说明、Release Notes、版本信息和 SHA256 校验文件。
 
-版本信息：
-
-- versionName: `0.2.0`
-- versionCode: `3`
-- minSdk: Android 10 / API 29
-- targetSdk: 36
-
-验收：
-
-- `assembleDebug`、`test`、`lint` 均已通过。
-- 17 项 JVM 测试通过，Lint 0 error。
-- HONOR ALI-AN00 / Android 15 真机 instrumentation 8 项测试通过。
-- 真机验证覆盖 `00 ↔ FF`、`55 ↔ AA`、自动切组、倒计时、Idle Gap、Pause/Resume、STOP/释放、重复启停和生命周期清理。
-- Continuous、Burst、Toggle 原模式回归通过。
-
-GitHub Actions 会重新构建 APK、执行 JVM 测试和 Lint，并在发布前校验 APK 的桌面应用名称为 `Memory Noise`。
-
-App 无网络权限和用户文件访问权限。GitHub Actions 生成的 APK 使用 CI debug 签名；如果旧版本签名不同，可能需要先卸载旧版再安装。
+App 无网络权限和用户文件访问权限。GitHub Actions 生成的 APK 使用 CI debug 签名；如果旧版本签名不同，需要先卸载旧版再安装。
 
 **实验解释边界：**观察到不同 Pattern 的近场差异，并不能直接证明探测到了 RAM 中存储的 0/1。变化可能同时来自 CPU、Cache、Memory Controller、DDR Bus、PMIC、DVFS 等因素。Sweep/Burst 受 Android 调度影响，不保证硬实时，应用统计带宽也不等于物理 DDR 带宽。
