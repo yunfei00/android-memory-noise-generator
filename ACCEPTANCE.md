@@ -1,4 +1,35 @@
-# 第一阶段验收记录
+# 验收记录
+
+## 0.2.0-beta.2 Pattern Sweep（2026-09-17）
+
+版本保持 `versionName=0.2.0-beta.2`、`versionCode=2`。设备为已连接的 HONOR ALI-AN00 / Android 15。正式默认值仍为 20 秒/组、2 秒 Gap，未为验收修改默认配置。
+
+执行结果：
+
+- `.\gradlew.bat assembleDebug test lint`：BUILD SUCCESSFUL。17 项 JVM 测试全部通过；Lint 0 errors、26 项非阻断警告。
+- `.\gradlew.bat assembleDebug assembleDebugAndroidTest`：成功。
+- `adb install -r`：主 APK 和测试 APK 均安装成功，主 APK 的版本已用 aapt 和设备包信息核验。
+- `adb shell am start -n com.example.memorynoise/.MainActivity`：启动成功。
+- `adb shell am instrument -w com.example.memorynoise.test/androidx.test.runner.AndroidJUnitRunner`：**OK (8 tests)**，耗时 239.228 秒。
+- 主 APK 没有声明网络、存储或其他 uses-permission。截图写入仅存在于独立 instrumentation 测试代码中，生产 App 未增加文件 I/O。
+
+| 检查 | 结果与范围 |
+| --- | --- |
+| 128 组真正覆盖 Buffer | 单元测试使用同一个数组，对全部 128 组各写 A/B/A/B 四遍，逐字节验证每遍结果，包括 64 KiB 边界和尾部。B 均为 A 的逐位取反。生产 Worker 使用同一个 ComplementWriter；每一遍在同一个测试 Buffer 上写入。 |
+| Sweep 正确性 | 改为逐阶段推进，调度迟到不跳组；Pattern 文案只在切组时格式化，热循环不再每块创建字符串/Pair。末组不追加 Gap。完整 128 组时间线、零 Gap、迟到与末组结束均有单元测试。 |
+| WRITE / GAP / PAUSE | 真机界面临时选择 2 秒/组、1 秒 Gap，验证 00↔FF、倒计时递减、进入 Idle Gap、自动进入 01↔FE。WRITE 与 GAP 均能暂停和恢复。 |
+| 暂停真的停止写入 | 单元测试直接保留引擎分配的真实数组，在 PAUSED 确认后复制并比较，等待超过整组时长后仍逐字节相同；总写入、组号和剩余时间也不变。Gap 同样验证数组不变。真机验证暂停计数/剩余时间稳定、当前带宽为零。 |
+| 55↔AA 真机观察 | 使用真实 2 秒/组、零 Gap，从 00 开始顺序运行约 170 秒到 #86 / 128；检查未跳组。界面显示 55↔AA、Remaining、Next 56↔A9。暂停 2.2 秒后恢复，验证同组继续完成多遍写入及 Toggle 增长，再自动进入 56↔A9。没有修改时钟或从 55 起跑。 |
+| STOP / 重复启动 | 真机 10 次 Sweep START/STOP，重复 start 被拒绝；join 确认线程退出，hasBuffer=false，STOPPED 后可重新开始。单测另覆盖 25 次快速 Start/Pause/Resume/Stop，以及 PAUSED 中 STOP。 |
+| 生命周期 | Sweep 暂停期间旋转屏幕：Worker 退出且 Buffer 释放；恢复页面后重新启动再将 Activity 移至后台停止状态，确认无遗留 Worker。 |
+| 原模式回归 | 原有 4 项真机测试全部通过，包含 OOM 恢复、按钮/常亮、旋转、Burst/快速启停；新增设备测试再次验证 Continuous、Burst、Toggle 的实际写入、计数及清理。 |
+| 人工可读性 | 已查看真机 WRITE、暂停 GAP、暂停 55↔AA 截图，Pattern、序号、Remaining、Next、按钮与统计竖屏同屏可见。WRITE/IDLE GAP/PAUSED 有不同状态和颜色。 |
+
+本轮没有进行频谱仪信号采集，也没有宣称观察到 RAM 0/1 的电磁信号；验收范围是 App 的控制行为和界面。Burst/Sweep 仍受 Android 调度影响，不保证硬实时。暂停保留 Buffer，STOP 清除引用但不强制 GC。没有新增网络、文件导出、GPU 负载、Tag 或 GitHub Release。
+
+可复验的测试源码为 `SweepTest.kt` 和 `SweepDeviceAcceptanceTest.kt`；本机完整设备输出保存在被 Git 忽略的 `app/build/device-acceptance.txt`，截图在 `app/build/sweep-*.png`。
+
+## 第一阶段（历史验收）
 
 日期：2026-09-16。设备：HONOR ALI-AN00，Android 15 / API 35，应用堆上限 384 MiB。
 

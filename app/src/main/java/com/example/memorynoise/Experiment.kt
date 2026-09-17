@@ -58,7 +58,8 @@ data class Snapshot(
     val cycles: Long = 0, val toggles: Long = 0, val currentBps: Double = 0.0,
     val error: String? = null, val reason: String = "",
     val sweepIndex: Int = -1, val sweepTotal: Int = 128,
-    val sweepCurrent: String = "—", val sweepNext: String = "—", val sweepRemainingMs: Long = 0
+    val sweepCurrent: String = "—", val sweepNext: String = "—", val sweepRemainingMs: Long = 0,
+    val sweepInGap: Boolean = false
 ) {
     val averageBps: Double get() = if (elapsedNs > 0) totalBytes * 1e9 / elapsedNs else 0.0
 }
@@ -69,6 +70,8 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
     @Volatile private var worker: Thread? = null
     @Volatile private var buffer: ByteArray? = null
     private val cancelled = AtomicBoolean(false)
+    private val pauseLock = Object()
+    @Volatile var isPauseRequested = false; private set
     @Volatile private var stopReason = "用户停止"
     val isRunning: Boolean get() = worker?.isAlive == true
     val hasBuffer: Boolean get() = buffer != null
@@ -76,7 +79,7 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
     @Synchronized fun start(config: Config): Boolean {
         if (isRunning) return false
         config.validate()
-        cancelled.set(false); stopReason = "用户停止"
+        cancelled.set(false); isPauseRequested = false; stopReason = "用户停止"
         val now = System.currentTimeMillis()
         val label = when (config.mode) { Mode.TOGGLE -> "AA-55"; Mode.SWEEP -> "SWEEP"; else -> config.pattern }
         val id = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date(now)) + "_${label}_${config.memoryMb}MB"
@@ -90,6 +93,19 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
         stopReason = reason; cancelled.set(true); worker?.interrupt()
     }
 
+    /** Asynchronous request. PAUSED is published only after the worker stops writing. */
+    @Synchronized fun pause(): Boolean {
+        if (!isRunning || cancelled.get() || snapshot.config?.mode != Mode.SWEEP) return false
+        synchronized(pauseLock) { isPauseRequested = true }
+        return true
+    }
+
+    @Synchronized fun resume(): Boolean {
+        if (!isRunning || cancelled.get() || !isPauseRequested) return false
+        synchronized(pauseLock) { isPauseRequested = false; pauseLock.notifyAll() }
+        return true
+    }
+
     fun awaitStopped(timeoutMs: Long): Boolean { worker?.join(timeoutMs); return !isRunning }
 
     private fun run(c: Config) {
@@ -99,53 +115,69 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
             buffer = allocate(c.memoryMb * 1024 * 1024)
             val writer = if (c.mode == Mode.SWEEP) null else PatternWriter(c.bytes())
             start = System.nanoTime()
-            val sweepUnitNs = (c.sweepPatternMs + c.sweepGapMs) * 1_000_000
-            val sweepDeadline = start + 128L * sweepUnitNs
-            val deadline = if (c.mode == Mode.SWEEP) sweepDeadline else if (c.durationMs == 0L) Long.MAX_VALUE else start + c.durationMs * 1_000_000
+            val deadline = if (c.mode == Mode.SWEEP || c.durationMs == 0L) Long.MAX_VALUE else start + c.durationMs * 1_000_000
+            val sweep = if (c.mode == Mode.SWEEP) SweepTimeline(c.sweepPatternMs, c.sweepGapMs) else null
+            val complementWriter = ComplementWriter()
             val period = (c.writeMs + c.idleMs) * 1_000_000
             var offset = 0; var nextPublish = start; var sampleTime = start; var sampleBytes = 0L; var bandwidth = 0.0; var previousState = ""
             var lastSweepIndex = -1; var sweepPass = 0L
+            var lastTick = start
             while (!cancelled.get()) {
                 val now = System.nanoTime(); if (now >= deadline) break
                 val elapsed = now - start
-                var sweepIndex = -1; var sweepCurrent = "—"; var sweepNext = "—"; var sweepRemaining = 0L
-                var sweepIdle = false
-                if (c.mode == Mode.SWEEP) {
-                    sweepIndex = (elapsed / sweepUnitNs).toInt().coerceIn(0, 127)
-                    if (sweepIndex != lastSweepIndex) { lastSweepIndex = sweepIndex; offset = 0; sweepPass = 0 }
-                    val phaseNs = elapsed % sweepUnitNs
-                    sweepIdle = phaseNs >= c.sweepPatternMs * 1_000_000
-                    sweepCurrent = pairLabel(sweepIndex)
-                    sweepNext = if (sweepIndex < 127) pairLabel(sweepIndex + 1) else "完成"
-                    val phaseEnd = if (sweepIdle) sweepUnitNs else c.sweepPatternMs * 1_000_000
-                    sweepRemaining = ((phaseEnd - phaseNs).coerceAtLeast(0) / 1_000_000)
+                sweep?.advance(now - lastTick)
+                lastTick = now
+                if (sweep?.finished == true) break
+                val sweepIndex = sweep?.index ?: -1
+                if (sweep != null && sweepIndex != lastSweepIndex) {
+                    lastSweepIndex = sweepIndex; offset = 0; sweepPass = 0
+                    complementWriter.select(sweepIndex)
                 }
                 cycles = if (c.mode == Mode.BURST) elapsed / period else 0
                 val idle = when (c.mode) {
-                    Mode.SWEEP -> sweepIdle
+                    Mode.SWEEP -> sweep!!.inGap
                     Mode.TOGGLE -> false
                     else -> c.pattern == "IDLE" || (c.mode == Mode.BURST && elapsed % period >= c.writeMs * 1_000_000)
                 }
-                val state = if (idle) "RUNNING / IDLE" else if (c.mode == Mode.SWEEP) "SWEEP / WRITE" else "RUNNING / WRITE"
-                if (now >= nextPublish || state != previousState) {
+                val state = if (sweep != null) {
+                    if (isPauseRequested) "PAUSED" else if (idle) "SWEEP / IDLE GAP" else "SWEEP / WRITE"
+                } else if (idle) "RUNNING / IDLE" else "RUNNING / WRITE"
+                if (now >= nextPublish || state != previousState || sweepIndex != snapshot.sweepIndex) {
                     if (now - sampleTime >= 200_000_000) {
                         bandwidth = (total - sampleBytes) * 1e9 / (now - sampleTime); sampleTime = now; sampleBytes = total
                     }
                     snapshot = snapshot.copy(state = state, allocated = buffer!!.size.toLong(), elapsedNs = elapsed, totalBytes = total,
-                        loops = loops, cycles = cycles, toggles = toggles, currentBps = if (idle) 0.0 else bandwidth,
-                        sweepIndex = sweepIndex, sweepCurrent = sweepCurrent, sweepNext = sweepNext, sweepRemainingMs = sweepRemaining)
+                        loops = loops, cycles = cycles, toggles = toggles, currentBps = if (idle || state == "PAUSED") 0.0 else bandwidth,
+                        sweepIndex = sweepIndex, sweepCurrent = sweep?.currentLabel ?: "—",
+                        sweepNext = sweep?.nextLabel ?: "—", sweepRemainingMs = (sweep?.remainingNs ?: 0) / 1_000_000,
+                        sweepInGap = sweep?.inGap ?: false)
                     previousState = state; nextPublish = now + 100_000_000
                 }
+                if (state == "PAUSED") {
+                    synchronized(pauseLock) {
+                        while (isPauseRequested && !cancelled.get()) {
+                            pauseLock.wait(100)
+                            snapshot = snapshot.copy(elapsedNs = System.nanoTime() - start)
+                        }
+                    }
+                    // Keep offset, pass parity, pair and phase remaining time. Exclude pause time.
+                    lastTick = System.nanoTime(); sampleTime = lastTick; sampleBytes = total; bandwidth = 0.0
+                    nextPublish = 0
+                    continue
+                }
+                // A request arriving during publication must be acknowledged before the next block.
+                if (cancelled.get() || isPauseRequested) continue
                 if (idle) {
-                    val wait = min(deadline - System.nanoTime(), 100_000_000L)
+                    val phaseEnd = if (sweep != null) now + sweep.remainingNs
+                        else if (c.mode == Mode.BURST && c.pattern != "IDLE") start + (cycles + 1) * period else deadline
+                    val wait = min(min(deadline, phaseEnd) - System.nanoTime(), 50_000_000L)
                     if (wait > 0) Thread.sleep(wait / 1_000_000, (wait % 1_000_000).toInt())
                 } else {
                     val size = buffer!!.size; val end = min(offset + 64 * 1024, size)
                     when (c.mode) {
                         Mode.TOGGLE -> buffer!!.fill(if (loops % 2 == 0L) 0xAA.toByte() else 0x55, offset, end)
                         Mode.SWEEP -> {
-                            val (a, b) = complementPair(sweepIndex)
-                            buffer!!.fill(if (sweepPass % 2 == 0L) a else b, offset, end)
+                            complementWriter.write(buffer!!, offset, end, sweepPass)
                         }
                         else -> writer!!.write(buffer!!, offset, end)
                     }
@@ -153,7 +185,7 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
                     if (offset == size) {
                         loops++; offset = 0
                         if (c.mode == Mode.TOGGLE) toggles = (loops - 1).coerceAtLeast(0)
-                        if (c.mode == Mode.SWEEP) { sweepPass++; toggles++ }
+                        if (c.mode == Mode.SWEEP) { sweepPass++; if (sweepPass > 1) toggles++ }
                     }
                 }
             }
@@ -163,6 +195,7 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
         } catch (e: Exception) { error = "${e.javaClass.simpleName}: ${e.message}"; reason = "运行异常"
         } finally {
             buffer = null
+            isPauseRequested = false
             val elapsed = if (start == 0L) 0L else System.nanoTime() - start
             cycles = if (start != 0L && c.mode == Mode.BURST) elapsed / ((c.writeMs + c.idleMs) * 1_000_000) else cycles
             snapshot = snapshot.copy(state = if (error == null) "STOPPED" else "ERROR / STOPPED", stopTime = System.currentTimeMillis(),
@@ -170,6 +203,41 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
                 currentBps = 0.0, error = error, reason = reason, sweepRemainingMs = 0)
             lastResult = snapshot
         }
+    }
+}
+
+/** One WRITE then one optional GAP per pair; late scheduling never skips a pair.
+ * The caller advances only unpaused time. No trailing gap after the final pair. */
+internal class SweepTimeline(private val writeMs: Long, private val gapMs: Long) {
+    var index = 0; private set
+    var inGap = false; private set
+    var finished = false; private set
+    var remainingNs = writeMs * 1_000_000; private set
+    var currentLabel = pairLabel(0); private set
+    var nextLabel = pairLabel(1); private set
+
+    fun advance(deltaNs: Long) {
+        if (finished) return
+        remainingNs = (remainingNs - deltaNs.coerceAtLeast(0)).coerceAtLeast(0)
+        if (remainingNs > 0) return
+        if (!inGap && index == 127) { finished = true; return }
+        if (!inGap && gapMs > 0) { inGap = true; remainingNs = gapMs * 1_000_000; return }
+        index++; inGap = false; remainingNs = writeMs * 1_000_000
+        currentLabel = pairLabel(index)
+        nextLabel = if (index < 127) pairLabel(index + 1) else "完成"
+    }
+}
+
+/** Each pass overwrites the same target array. No source-template reads or per-block allocations. */
+internal class ComplementWriter {
+    private var a: Byte = 0
+    private var b: Byte = -1
+    fun select(index: Int) {
+        require(index in 0..127)
+        a = index.toByte(); b = (index xor 0xFF).toByte()
+    }
+    fun write(target: ByteArray, from: Int, until: Int, pass: Long) {
+        target.fill(if (pass % 2 == 0L) a else b, from, until)
     }
 }
 
