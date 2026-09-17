@@ -57,11 +57,30 @@ jobs:
       - name: Build APK and run JVM tests and lint
         run: ./gradlew --no-daemon assembleDebug testDebugUnitTest lintDebug
 
-      - name: Verify launcher application name
+      - name: Verify launcher metadata
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | tee /tmp/apk-badging.txt
-          grep -F "application-label:'Memory Noise'" /tmp/apk-badging.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path('/tmp/apk-badging.txt').read_text()
+          if "application-label:'Memory Noise'" not in text:
+              raise SystemExit('Missing application label: Memory Noise')
+          app = next((line for line in text.splitlines() if line.startswith('application: ')), '')
+          launch = next((line for line in text.splitlines() if line.startswith('launchable-activity: ')), '')
+          app_icon = re.search(r"icon='([^']+)'", app)
+          launch_icon = re.search(r"icon='([^']+)'", launch)
+          if not app_icon or not app_icon.group(1):
+              raise SystemExit('Application icon is missing')
+          if "label='Memory Noise'" not in launch:
+              raise SystemExit('Launcher activity label is missing')
+          if not launch_icon or not launch_icon.group(1):
+              raise SystemExit('Launcher activity icon is missing')
+          print(app)
+          print(launch)
+          PY
 
       - name: Prepare release package
         env:
