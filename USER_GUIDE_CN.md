@@ -1,6 +1,6 @@
 # Android Memory Noise Generator 使用说明
 
-版本：0.2.0
+版本：0.2.1
 
 ## 1. 工具用途
 
@@ -12,11 +12,12 @@ Android Memory Noise Generator 用于近场电磁探测实验中的受控内存�
 
 ## 2. 安装
 
-1. 将发布包中的 `android-memory-noise-generator-v0.2.0.apk` 复制到 Android 手机。
-2. 在手机上点击 APK 安装。
-3. 如系统提示“禁止安装未知来源应用”，按照系统提示允许当前文件管理器或浏览器安装 APK。
-4. 安装完成后，桌面应用名称显示为 **Memory Noise**。
-5. Android 10 及以上系统可使用。
+1. 将发布包中的 `android-memory-noise-generator-v0.2.1.apk` 复制到 Android 手机。
+2. 建议先卸载旧版，再安装 v0.2.1，避免部分手机桌面缓存旧的应用名称或图标信息。
+3. 在手机上点击 APK 安装。
+4. 如系统提示“禁止安装未知来源应用”，按照系统提示允许当前文件管理器或浏览器安装 APK。
+5. 安装完成后，桌面应用名称应显示为 **Memory Noise**。
+6. Android 10 及以上系统可使用。
 
 如果手机已经安装过本工具，但提示签名不一致无法覆盖，请先卸载旧版本，再安装本版本。GitHub Actions 构建的 APK 使用 CI debug 签名。
 
@@ -84,7 +85,7 @@ Android Memory Noise Generator 用于近场电磁探测实验中的受控内存�
 
 ## 4. Pattern Sweep 使用方法
 
-这是 0.2.0 的重点功能，适合实验人员站在频谱仪旁人工观察。
+这是 0.2.x 的重点功能，适合实验人员站在频谱仪旁人工观察。
 
 推荐首次实验：
 
@@ -182,6 +183,10 @@ Android Memory Noise Generator 用于近场电磁探测实验中的受控内存�
 
 ## 8. 常见问题
 
+### 安装后桌面只有图标，没有应用名称
+
+v0.2.1 已增加显式 Launcher 图标和名称元数据，并在 GitHub Actions 发布前强制检查最终 APK 中的名称和图标。若手机上仍保留旧显示，先卸载旧版，再安装 v0.2.1；部分 OEM Launcher 会缓存旧应用的桌面元数据。
+
 ### 点击 START 后提示内存不足
 
 降低 Memory，例如从 512 MB 改为 256 MB、128 MB 或 64 MB。
@@ -200,19 +205,21 @@ Android 不是硬实时系统，线程调度会产生少量误差。Sweep 采用
 
 ### 为什么 App 没有频谱仪控制功能
 
-0.2.0 的目标是把手机端激励做稳定、简单、可重复，避免手机控制和仪表控制同时引入复杂度。当前方案更适合人工观察频谱仪。
+当前版本目标是把手机端激励做稳定、简单、可重复，避免手机控制和仪表控制同时引入复杂度。当前方案更适合人工观察频谱仪。
 
 ## 9. 发布包内容
 
 正式发布 ZIP 包包含：
 
-- `android-memory-noise-generator-v0.2.0.apk`：Android 安装包。
+- `android-memory-noise-generator-v0.2.1.apk`：Android 安装包。
 - `USER_GUIDE_CN.md`：本使用说明。
 - `RELEASE_NOTES.md`：版本更新说明。
+- `VERSION.txt`：版本与提交信息。
+- `SHA256SUMS.txt`：APK 校验值。
 
 ## 10. 当前版本范围
 
-v0.2.0 已包含：
+v0.2.1 已包含：
 
 - 固定 Pattern 内存写入。
 - Continuous / Burst / Toggle。
@@ -222,5 +229,6 @@ v0.2.0 已包含：
 - 大字体实验观察界面。
 - STOP / 生命周期清理。
 - 实时统计。
+- 显式 Launcher 名称与图标资源。
 
 当前未包含：频谱仪自动控制、CSV 导出、JNI Native Buffer、DDR 锁频、Cache flush、GPU/NPU 压力任务。
