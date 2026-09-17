@@ -6,16 +6,16 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
-enum class Mode { CONTINUOUS, BURST, TOGGLE }
+enum class Mode { CONTINUOUS, BURST, TOGGLE, SWEEP }
 
 data class Config(
     val memoryMb: Int, val pattern: String, val hex: String = "AA55",
     val mode: Mode = Mode.CONTINUOUS, val durationMs: Long = 0,
-    val writeMs: Long = 1000, val idleMs: Long = 1000
+    val writeMs: Long = 1000, val idleMs: Long = 1000,
+    val sweepPatternMs: Long = 20_000, val sweepGapMs: Long = 2_000
 ) {
     fun bytes(): ByteArray = when (pattern) {
-        "IDLE" -> byteArrayOf(0)
-        "ZERO" -> byteArrayOf(0)
+        "IDLE", "ZERO" -> byteArrayOf(0)
         "ONE" -> byteArrayOf(-1)
         "AA" -> byteArrayOf(0xAA.toByte())
         "55" -> byteArrayOf(0x55)
@@ -27,7 +27,9 @@ data class Config(
         require(memoryMb in 1..2047) { "内存必须为 1–2047 MB" }
         require(durationMs in 0..86_400_000) { "时长必须为 0–86400 秒" }
         require(writeMs in 1..3_600_000 && idleMs in 1..3_600_000) { "Write / Idle 必须为 1–3600000 ms" }
-        bytes()
+        require(sweepPatternMs in 1_000..3_600_000) { "Sweep 单组时间必须为 1–3600 秒" }
+        require(sweepGapMs in 0..60_000) { "Sweep 间隔必须为 0–60 秒" }
+        if (mode != Mode.SWEEP) bytes()
     }
 }
 
@@ -39,17 +41,28 @@ fun parseHex(input: String): ByteArray {
     return ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 }
 
+fun complementPair(index: Int): Pair<Byte, Byte> {
+    require(index in 0..127)
+    return index.toByte() to (index xor 0xFF).toByte()
+}
+
+fun pairLabel(index: Int): String {
+    val (a, b) = complementPair(index)
+    return "%02X ↔ %02X".format(Locale.US, a.toInt() and 0xFF, b.toInt() and 0xFF)
+}
+
 data class Snapshot(
     val config: Config? = null, val id: String = "—", val startTime: Long = 0,
     val stopTime: Long = 0, val state: String = "STOPPED", val allocated: Long = 0,
     val elapsedNs: Long = 0, val totalBytes: Long = 0, val loops: Long = 0,
     val cycles: Long = 0, val toggles: Long = 0, val currentBps: Double = 0.0,
-    val error: String? = null, val reason: String = ""
+    val error: String? = null, val reason: String = "",
+    val sweepIndex: Int = -1, val sweepTotal: Int = 128,
+    val sweepCurrent: String = "—", val sweepNext: String = "—", val sweepRemainingMs: Long = 0
 ) {
     val averageBps: Double get() = if (elapsedNs > 0) totalBytes * 1e9 / elapsedNs else 0.0
 }
 
-/** Pure JVM controller: no Activity, View or Android Context references. */
 class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it) }) {
     @Volatile var snapshot = Snapshot(); private set
     @Volatile var lastResult: Snapshot? = null; private set
@@ -63,10 +76,9 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
     @Synchronized fun start(config: Config): Boolean {
         if (isRunning) return false
         config.validate()
-        cancelled.set(false)
-        stopReason = "用户停止"
+        cancelled.set(false); stopReason = "用户停止"
         val now = System.currentTimeMillis()
-        val label = if (config.mode == Mode.TOGGLE) "AA-55" else config.pattern
+        val label = when (config.mode) { Mode.TOGGLE -> "AA-55"; Mode.SWEEP -> "SWEEP"; else -> config.pattern }
         val id = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date(now)) + "_${label}_${config.memoryMb}MB"
         snapshot = Snapshot(config = config, id = id, startTime = now, state = "ALLOCATING")
         worker = Thread({ run(config) }, "MemoryNoiseWorker").also { it.start() }
@@ -75,96 +87,92 @@ class ExperimentEngine(private val allocate: (Int) -> ByteArray = { ByteArray(it
 
     @Synchronized fun stop(reason: String = "用户停止") {
         if (!isRunning) return
-        stopReason = reason
-        cancelled.set(true)
-        worker?.interrupt()
+        stopReason = reason; cancelled.set(true); worker?.interrupt()
     }
 
     fun awaitStopped(timeoutMs: Long): Boolean { worker?.join(timeoutMs); return !isRunning }
 
     private fun run(c: Config) {
-        var start = 0L
-        var total = 0L
-        var loops = 0L
-        var cycles = 0L
-        var toggles = 0L
-        var error: String? = null
-        var reason = "计时结束"
+        var start = 0L; var total = 0L; var loops = 0L; var cycles = 0L; var toggles = 0L
+        var error: String? = null; var reason = "计时结束"
         try {
-            // Allocation and initial VM zeroing are outside measured experiment time.
             buffer = allocate(c.memoryMb * 1024 * 1024)
-            val pattern = c.bytes()
-            val writer = PatternWriter(pattern)
+            val writer = if (c.mode == Mode.SWEEP) null else PatternWriter(c.bytes())
             start = System.nanoTime()
-            val deadline = if (c.durationMs == 0L) Long.MAX_VALUE else start + c.durationMs * 1_000_000
+            val sweepUnitNs = (c.sweepPatternMs + c.sweepGapMs) * 1_000_000
+            val sweepDeadline = start + 128L * sweepUnitNs
+            val deadline = if (c.mode == Mode.SWEEP) sweepDeadline else if (c.durationMs == 0L) Long.MAX_VALUE else start + c.durationMs * 1_000_000
             val period = (c.writeMs + c.idleMs) * 1_000_000
-            var offset = 0
-            var nextPublish = start
-            var sampleTime = start
-            var sampleBytes = 0L
-            var bandwidth = 0.0
-            var previousState = ""
+            var offset = 0; var nextPublish = start; var sampleTime = start; var sampleBytes = 0L; var bandwidth = 0.0; var previousState = ""
+            var lastSweepIndex = -1; var sweepPass = 0L
             while (!cancelled.get()) {
-                val now = System.nanoTime()
-                if (now >= deadline) break
+                val now = System.nanoTime(); if (now >= deadline) break
                 val elapsed = now - start
+                var sweepIndex = -1; var sweepCurrent = "—"; var sweepNext = "—"; var sweepRemaining = 0L
+                var sweepIdle = false
+                if (c.mode == Mode.SWEEP) {
+                    sweepIndex = (elapsed / sweepUnitNs).toInt().coerceIn(0, 127)
+                    if (sweepIndex != lastSweepIndex) { lastSweepIndex = sweepIndex; offset = 0; sweepPass = 0 }
+                    val phaseNs = elapsed % sweepUnitNs
+                    sweepIdle = phaseNs >= c.sweepPatternMs * 1_000_000
+                    sweepCurrent = pairLabel(sweepIndex)
+                    sweepNext = if (sweepIndex < 127) pairLabel(sweepIndex + 1) else "完成"
+                    val phaseEnd = if (sweepIdle) sweepUnitNs else c.sweepPatternMs * 1_000_000
+                    sweepRemaining = ((phaseEnd - phaseNs).coerceAtLeast(0) / 1_000_000)
+                }
                 cycles = if (c.mode == Mode.BURST) elapsed / period else 0
-                val idle = c.mode != Mode.TOGGLE && (c.pattern == "IDLE" || (c.mode == Mode.BURST && elapsed % period >= c.writeMs * 1_000_000))
-                val state = if (idle) "RUNNING / IDLE" else "RUNNING / WRITE"
+                val idle = when (c.mode) {
+                    Mode.SWEEP -> sweepIdle
+                    Mode.TOGGLE -> false
+                    else -> c.pattern == "IDLE" || (c.mode == Mode.BURST && elapsed % period >= c.writeMs * 1_000_000)
+                }
+                val state = if (idle) "RUNNING / IDLE" else if (c.mode == Mode.SWEEP) "SWEEP / WRITE" else "RUNNING / WRITE"
                 if (now >= nextPublish || state != previousState) {
                     if (now - sampleTime >= 200_000_000) {
-                        bandwidth = (total - sampleBytes) * 1e9 / (now - sampleTime)
-                        sampleTime = now; sampleBytes = total
+                        bandwidth = (total - sampleBytes) * 1e9 / (now - sampleTime); sampleTime = now; sampleBytes = total
                     }
-                    snapshot = snapshot.copy(state = state, allocated = buffer!!.size.toLong(), elapsedNs = elapsed,
-                        totalBytes = total, loops = loops, cycles = cycles, toggles = toggles,
-                        currentBps = if (idle) 0.0 else bandwidth)
-                    previousState = state
-                    nextPublish = now + 100_000_000
+                    snapshot = snapshot.copy(state = state, allocated = buffer!!.size.toLong(), elapsedNs = elapsed, totalBytes = total,
+                        loops = loops, cycles = cycles, toggles = toggles, currentBps = if (idle) 0.0 else bandwidth,
+                        sweepIndex = sweepIndex, sweepCurrent = sweepCurrent, sweepNext = sweepNext, sweepRemainingMs = sweepRemaining)
+                    previousState = state; nextPublish = now + 100_000_000
                 }
                 if (idle) {
-                    val phaseEnd = if (c.pattern == "IDLE") deadline else start + (cycles + 1) * period
-                    val wait = min(min(phaseEnd, deadline) - System.nanoTime(), 100_000_000L)
+                    val wait = min(deadline - System.nanoTime(), 100_000_000L)
                     if (wait > 0) Thread.sleep(wait / 1_000_000, (wait % 1_000_000).toInt())
                 } else {
-                    val size = buffer!!.size
-                    val end = min(offset + 64 * 1024, size)
-                    if (c.mode == Mode.TOGGLE) buffer!!.fill(if (loops % 2 == 0L) 0xAA.toByte() else 0x55, offset, end)
-                    else writer.write(buffer!!, offset, end)
-                    total += end - offset
-                    offset = end
+                    val size = buffer!!.size; val end = min(offset + 64 * 1024, size)
+                    when (c.mode) {
+                        Mode.TOGGLE -> buffer!!.fill(if (loops % 2 == 0L) 0xAA.toByte() else 0x55, offset, end)
+                        Mode.SWEEP -> {
+                            val (a, b) = complementPair(sweepIndex)
+                            buffer!!.fill(if (sweepPass % 2 == 0L) a else b, offset, end)
+                        }
+                        else -> writer!!.write(buffer!!, offset, end)
+                    }
+                    total += end - offset; offset = end
                     if (offset == size) {
-                        loops++
-                        // Count transitions between completed full-buffer AA/55 passes.
-                        toggles = if (c.mode == Mode.TOGGLE) (loops - 1).coerceAtLeast(0) else 0
-                        offset = 0
+                        loops++; offset = 0
+                        if (c.mode == Mode.TOGGLE) toggles = (loops - 1).coerceAtLeast(0)
+                        if (c.mode == Mode.SWEEP) { sweepPass++; toggles++ }
                     }
                 }
             }
-            if (cancelled.get()) reason = stopReason
-        } catch (_: InterruptedException) {
-            reason = stopReason
-        } catch (_: OutOfMemoryError) {
-            buffer = null
-            error = "内存分配或运行失败（OutOfMemoryError），请减小 Memory Size。"
-            reason = "内存不足"
-        } catch (e: Exception) {
-            error = "${e.javaClass.simpleName}: ${e.message}"
-            reason = "运行异常"
+            if (cancelled.get()) reason = stopReason else if (c.mode == Mode.SWEEP) reason = "Sweep 完成"
+        } catch (_: InterruptedException) { reason = stopReason
+        } catch (_: OutOfMemoryError) { buffer = null; error = "内存分配或运行失败（OutOfMemoryError），请减小 Memory Size。"; reason = "内存不足"
+        } catch (e: Exception) { error = "${e.javaClass.simpleName}: ${e.message}"; reason = "运行异常"
         } finally {
             buffer = null
             val elapsed = if (start == 0L) 0L else System.nanoTime() - start
-            cycles = if (start != 0L && c.mode == Mode.BURST) elapsed / ((c.writeMs + c.idleMs) * 1_000_000) else 0
-            snapshot = snapshot.copy(state = if (error == null) "STOPPED" else "ERROR / STOPPED",
-                stopTime = System.currentTimeMillis(), allocated = 0, elapsedNs = elapsed,
-                totalBytes = total, loops = loops, cycles = cycles, toggles = toggles,
-                currentBps = 0.0, error = error, reason = reason)
+            cycles = if (start != 0L && c.mode == Mode.BURST) elapsed / ((c.writeMs + c.idleMs) * 1_000_000) else cycles
+            snapshot = snapshot.copy(state = if (error == null) "STOPPED" else "ERROR / STOPPED", stopTime = System.currentTimeMillis(),
+                allocated = 0, elapsedNs = elapsed, totalBytes = total, loops = loops, cycles = cycles, toggles = toggles,
+                currentBps = 0.0, error = error, reason = reason, sweepRemainingMs = 0)
             lastResult = snapshot
         }
     }
 }
 
-/** Replaceable managed-memory writer; a JNI backend can implement this boundary later. */
 class PatternWriter(private val pattern: ByteArray) {
     private val template = ByteArray(64 * 1024 + pattern.size) { pattern[it % pattern.size] }
     fun write(target: ByteArray, from: Int, until: Int) {
