@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    name: Build and publish APK
+    name: Build and publish APK package
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -57,24 +57,57 @@ jobs:
       - name: Build APK and run JVM tests and lint
         run: ./gradlew --no-daemon assembleDebug testDebugUnitTest lintDebug
 
-      - name: Prepare APK
+      - name: Verify launcher application name
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | tee /tmp/apk-badging.txt
+          grep -F "application-label:'Memory Noise'" /tmp/apk-badging.txt
+
+      - name: Prepare release package
         env:
           TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
-          mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/android-memory-noise-generator-${TAG}.apk"
+          set -euo pipefail
+          mkdir -p dist/package
+          apk="dist/android-memory-noise-generator-${TAG}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$apk"
+          cp "$apk" "dist/package/android-memory-noise-generator-${TAG}.apk"
+          cp USER_GUIDE_CN.md dist/package/USER_GUIDE_CN.md
+          cp .github/release-notes.md dist/package/RELEASE_NOTES.md
+          printf 'Android Memory Noise Generator\nVersion: %s\nCommit: %s\n' "$TAG" "$SHA" > dist/package/VERSION.txt
+          (cd dist/package && sha256sum "android-memory-noise-generator-${TAG}.apk" > SHA256SUMS.txt)
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import zipfile
 
-      - name: Create GitHub Release and upload APK
+          tag = os.environ['TAG']
+          package_dir = pathlib.Path('dist/package')
+          zip_path = pathlib.Path('dist') / f'android-memory-noise-generator-{tag}-package.zip'
+          with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(package_dir.iterdir()):
+                  zf.write(path, arcname=path.name)
+          PY
+          sha256sum "$apk" "dist/android-memory-noise-generator-${TAG}-package.zip" > dist/SHA256SUMS.txt
+          echo "===== Release files ====="
+          ls -lh dist
+          echo "===== Package contents ====="
+          python3 -m zipfile -l "dist/android-memory-noise-generator-${TAG}-package.zip"
+
+      - name: Create GitHub Release and upload package
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           apk="dist/android-memory-noise-generator-${TAG}.apk"
+          package="dist/android-memory-noise-generator-${TAG}-package.zip"
+          checksums="dist/SHA256SUMS.txt"
           title="Android Memory Noise Generator ${TAG}"
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" "$apk" --clobber
+            gh release upload "$TAG" "$apk" "$package" "$checksums" --clobber
             gh release edit "$TAG" --title "$title" --notes-file .github/release-notes.md
           else
-            gh release create "$TAG" "$apk" --verify-tag --title "$title" --notes-file .github/release-notes.md
+            gh release create "$TAG" "$apk" "$package" "$checksums" --verify-tag --title "$title" --notes-file .github/release-notes.md
           fi
